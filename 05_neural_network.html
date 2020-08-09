@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf8">
+  <style>
+    body {
+      margin: 0;
+      font-family: monospace;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="demo-canvas" oncontextmenu="return false;"></canvas>
+</body>
+
+<script id="vs" type="notjs">
+attribute vec4 position;
+
+void main() {
+  gl_Position = position;
+}
+  </script>
+
+<script id="display" type="notjs">
+precision mediump float;
+
+uniform vec2 resolution;
+uniform vec2 mouse_pos;
+uniform sampler2D input_tex;
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / resolution;
+  vec2 distance  = abs(mouse_pos * resolution - gl_FragCoord.xy);
+  
+  if (distance.x * distance.x + distance.y * distance.y < 50.0){
+    gl_FragColor = vec4(0.0,1.0,0.0,0.5);
+  } else {
+    vec4 sampled = texture2D(input_tex, uv);
+    float to_display = sampled.y;
+    gl_FragColor = vec4(max(0.0,to_display), 0.0, max(0.0,-to_display), 1.0 );
+  }
+}
+  </script>
+
+<script id="spike" type="notjs">
+    precision mediump float;
+    uniform float N;
+    uniform sampler2D input_tex;
+    uniform sampler2D adj;
+   
+    const int max_its = 100;
+
+    vec4 get_relative(vec2 offset) {
+      return texture2D(input_tex, (gl_FragCoord.xy + offset) / vec2(N, N));
+   } 
+
+   vec4 get_absolute(vec2 coords) {
+    return texture2D(input_tex, coords / vec2(N, N));
+ } 
+
+   vec4 get_weight(vec2 coords) {
+    return texture2D(adj, coords / vec2(N * N, N * N));
+  } 
+
+  float sigmoid(float x) {
+      return 2.0 / (1.0 + (exp(-(x)))) - 1.0;
+    }
+
+    void main() {
+      float neuron_count = N * N;
+      float current_index = floor(gl_FragCoord.x) + floor(gl_FragCoord.y) * N;
+
+      float sum = 0.0;
+      for (int j = 0; j < max_its; j++) {
+        if (j < int(N)) {
+          for (int i = 0; i < max_its; i++) {
+            if (i < int(N)) {
+                float other_activation = get_absolute(vec2(float(i), float(j))).x;
+                float other_index = float(i) + float(j) * N;
+                float weight = get_weight(vec2(other_index, current_index)).x;
+                if (weight != 0.0) {
+                  sum += other_activation * weight;
+                }
+              }
+            }
+        }
+      }
+      
+      float neuron_output = sigmoid(sum);
+      vec4 center = get_relative(vec2(0.0, 0.0));
+
+      if (abs(neuron_output) > center.z) { 
+        center.x = sign(neuron_output); // fire
+        center.y += sign(neuron_output);
+        if (abs(center.y) > 1.0){
+          center.y = sign(center.y);
+        }
+      } else {
+        center.x = 0.0; // turn off firing
+      }
+
+      center.y = center.y * center.w; // trace decay
+      gl_FragColor = center;
+    }
+  </script>
+
+<script type="module">
+  import * as twgl from 'https://twgljs.org/dist/4.x/twgl-full.module.js';
+  const gl = document.querySelector("#demo-canvas").getContext("webgl");
+
+  let mouse_x = 0.0;
+  let mouse_y = 0.0;
+  let mouse_state = "up";
+  let left_click = false;
+  let right_click = false;
+
+  // Two triangles that represent the targeted surface
+  const arrays = {
+    position: [-1, -1, 0, 1, -1, 0, -1, 1, 0,
+    -1, 1, 0, 1, -1, 0, 1, 1, 0],
+  };
+  const bufferInfo = twgl.createBufferInfoFromArrays(gl, arrays);
+
+  // Activate OES_texture_float
+  var floatTextures = gl.getExtension('OES_texture_float');
+  if (!floatTextures) {
+    alert('no floating point texture support');
+  }
+
+  function createTensor(h, w) {
+    const attachments = [{ minMag: gl.NEAREST }];
+    const fbi = twgl.createFramebufferInfo(gl, attachments, w, h);
+    const tex = fbi.attachments[0];
+    return { fbi, tex };
+  }
+
+  //--------------------
+
+  // neuron buffer t (x: is_firing, y: trace z: threshold w: trace_decay_speed)
+  // neuron buffer t+1 (x: is_firing, y: trace)
+  // adjacency matrix (x: weight)
+
+  // 1) for each neuron i
+  //    neuron buffer t+1(i).x = sum(for neuron j where j!=i: matrix(i,j) x neuron j.x) > neuron i.z ? 1.0 : 0.0
+  //    if neuron buffer t+1(i).x == 1.0 then neuron buffer t+1(i).y += 1.0
+  //    neuron buffer t+1(i).y = neuron buffer t+1(i).y * neuron buffer t+1(i).w
+
+  // 2) Display
+  // - is firing
+  // - trace
+  // - weights
+
+  // 3) swap(neuron buffer t, neuron buffer t+1)
+
+  const spike_program = twgl.createProgramInfo(gl, ["vs", "spike"]);
+  const display_program = twgl.createProgramInfo(gl, ["vs", "display"]);
+
+  const N = 35;
+  const neuron_count = N * N;
+
+  let neuron_current = createTensor(N, N)
+  let neuron_next = createTensor(N, N)
+  let adjacency = createTensor(neuron_count, neuron_count)
+
+  // Initialize buffers
+  var item = Array.from({ length: neuron_count * 4 }, () => 0.0);
+  for (var i = 0; i < neuron_count; i++) {
+    item[i * 4 + 2] = 0.5; // threshold
+    item[i * 4 + 3] = 0.98; // decay
+  }
+  twgl.setTextureFromArray(gl, neuron_current.tex, new Float32Array(item), { type: gl.FLOAT });
+  twgl.setTextureFromArray(gl, neuron_next.tex, new Float32Array(item), { type: gl.FLOAT });
+
+  // Create edges
+  item = Array.from({ length: neuron_count * neuron_count * 4 }, () => 0.0);
+  for (var i = 0; i < neuron_count; i++) {
+    if (Math.random() > 0.7) {
+      for (var j = 0; j < neuron_count; j++) {
+        if (Math.random() > 0.9 && i != j) {
+          item[(i + j * neuron_count) * 4] = (Math.random() - 0.5) * 2.0;
+        }
+      } }
+    }
+
+    // item = Array.from({ length: neuron_count * neuron_count * 4 }, () => 0.0);
+    // var edges = [{from:0, to:1, weight: 1.0}, {from:1, to:2, weight: -1.0}]
+    // edges.forEach(edge => {
+    //   item[(edge.from + edge.to * neuron_count) * 4] = edge.weight;
+    // });
+
+    twgl.setTextureFromArray(gl, adjacency.tex, new Float32Array(item), { type: gl.FLOAT });
+    twgl.bindFramebufferInfo(gl, null);
+
+    function swap() {
+      let temp = neuron_current;
+      neuron_current = neuron_next;
+      neuron_next = temp;
+    }
+
+    function runProgram(programInfo, input_tensor, output_tensor, extra_uniforms) {
+      // set output
+      if (output_tensor == null) {
+        twgl.bindFramebufferInfo(gl, null); // canvas
+      } else {
+        twgl.bindFramebufferInfo(gl, output_tensor.fbi);
+      }
+
+      twgl.resizeCanvasToDisplaySize(gl.canvas); // canvas size = display size
+      // View
+      gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+
+      // set inputs
+      let uniforms = {
+        input_tex: input_tensor.tex,
+      };
+
+      if (extra_uniforms != null) {
+        uniforms = Object.assign({}, uniforms, extra_uniforms);
+      }
+
+      // run shader
+      gl.useProgram(programInfo.program);
+      twgl.setBuffersAndAttributes(gl, programInfo, bufferInfo);
+      twgl.setUniforms(programInfo, uniforms);
+      twgl.drawBufferInfo(gl, bufferInfo);
+    }
+
+    function render(time) {
+      runProgram(spike_program, neuron_current, neuron_next, { adj: adjacency.tex, N: N });
+      runProgram(display_program, neuron_next, null, { mouse_pos: [mouse_x, mouse_y], resolution: [gl.canvas.width, gl.canvas.height] });
+
+      swap();
+      requestAnimationFrame(render);
+    }
+
+    window.addEventListener('mousedown', e => {
+      mouse_state = 'down';
+      left_click = e.button == 0;
+      right_click = e.button == 2;
+    });
+
+    window.addEventListener('mouseup', e => {
+      mouse_state = 'up';
+    });
+
+    window.addEventListener('mousemove', e => {
+      var rect = gl.canvas.getBoundingClientRect();
+      const pos = {
+        x: (e.clientX - rect.left) / gl.canvas.clientWidth,
+        y: (e.clientY - rect.top) / gl.canvas.clientHeight
+      }
+
+      mouse_x = pos.x;
+      mouse_y = 1.0 - pos.y;
+
+      if (mouse_state == 'down') {
+        let mouse_x_grid = Math.floor(N * mouse_x);
+        let mouse_y_grid = Math.floor(N * mouse_y);
+
+        twgl.bindFramebufferInfo(gl, neuron_current.fbi);
+        var pixels = new Float32Array(4);
+        gl.readPixels(mouse_x_grid, mouse_y_grid, 1, 1, gl.RGBA, gl.FLOAT, pixels);
+        pixels[0] = (left_click ? 1.0 : -1.0); // Fire
+        pixels[1] = pixels[1] + (left_click ? 1.0 : -1.0); // Trace
+        twgl.bindFramebufferInfo(gl, neuron_next.fbi);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, mouse_x_grid, mouse_y_grid, 1, 1, gl.RGBA, gl.FLOAT, pixels);
+        twgl.bindFramebufferInfo(gl, null);
+      }
+    });
+
+    requestAnimationFrame(render);
+</script>
+
+</html>

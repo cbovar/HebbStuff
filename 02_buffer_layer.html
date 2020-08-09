@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf8">
+  <style>
+    body {
+      margin: 0;
+      font-family: monospace;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="demo-canvas"></canvas>
+</body>
+
+<script id="vs" type="notjs">
+attribute vec4 position;
+
+void main() {
+  gl_Position = position;
+}
+  </script>
+
+<script id="fs" type="notjs">
+precision mediump float;
+
+uniform vec2 grid;
+uniform vec2 resolution;
+uniform vec2 mouse_pos;
+uniform sampler2D input_tex;
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / resolution;
+  vec2 distance  = abs(mouse_pos - uv);
+
+  if (distance.x * distance.x + distance.y * distance.y < 0.01){
+    vec4 test = texture2D(input_tex, uv);
+    gl_FragColor = vec4(max(0.0,test.x-0.5)*2.0, 0, max(0.0,0.5-test.x)*2.0, 1.0 ) + vec4(0.0,1.0,0.0,0.5);
+
+    //gl_FragColor = vec4(0.0,1.0,0.0,0.5);
+  } else {
+    vec4 test = texture2D(input_tex, uv);
+    gl_FragColor = vec4(max(0.0,test.x-0.5)*2.0, 0, max(0.0,0.5-test.x)*2.0, 1.0 );
+  }
+}
+  </script>
+
+  <script id="copy" type="notjs">
+    precision mediump float;
+    
+    uniform vec2 resolution;
+    uniform sampler2D input_tex;
+    
+    void main() {
+        vec2 uv = gl_FragCoord.xy / resolution;
+        gl_FragColor = texture2D(input_tex, uv);
+        gl_FragColor.w = 1.0;
+    }
+      </script>
+
+<script type="module">
+  import * as twgl from 'https://twgljs.org/dist/4.x/twgl-full.module.js';
+  const gl = document.querySelector("#demo-canvas").getContext("webgl");
+  
+  const programInfo = twgl.createProgramInfo(gl, ["vs", "fs"]);
+  const copy_programInfo = twgl.createProgramInfo(gl, ["vs", "copy"]);
+
+  const neuron_count = 3 * 3;
+  const [gridW, gridH] = [Math.sqrt(neuron_count), Math.sqrt(neuron_count)];
+  const CHANNEL_N = 3; // activation, next_activation, trace
+
+  let mouse_x = 0.0;
+  let mouse_y = 0.0;
+
+  function createTensor(h, w) {
+    const attachments = [{ minMag: gl.NEAREST }];
+    const fbi = twgl.createFramebufferInfo(gl, attachments, w, h);
+    const tex = fbi.attachments[0];
+
+    return { _type: 'tensor', fbi, tex };
+  }
+
+  const arrays = {
+    position: [-1, -1, 0, 1, -1, 0, -1, 1, 0,
+    -1, 1, 0, 1, -1, 0, 1, 1, 0],
+  };
+  const bufferInfo = twgl.createBufferInfoFromArrays(gl, arrays);
+
+  var floatTextures = gl.getExtension('OES_texture_float');
+  if (!floatTextures) {
+    alert('no floating point texture support');
+  }
+
+  //--------------------
+
+  let front = createTensor(gridW, gridH)
+  let back = createTensor(gridW, gridH)
+  let current = back;
+
+  function swap() {
+    let temp = front;
+    front = back;
+    back = temp;
+  }
+
+  var item = Array.from({ length: neuron_count * 4 }, () => Math.random());
+  twgl.setTextureFromArray(gl, front.tex, new Float32Array(item), { type: gl.FLOAT });
+
+  item = Array.from({ length: neuron_count * 4 }, () => 0.5);
+  twgl.setTextureFromArray(gl, back.tex, new Float32Array(item), { type: gl.FLOAT });
+
+  twgl.bindFramebufferInfo(gl, null);
+
+
+  function runProgram(programInfo, input_tensor, output_tensor, resolution) {
+    // set output
+    if (output_tensor == null) {
+      twgl.bindFramebufferInfo(gl, null); // canvas
+    } else {
+      twgl.bindFramebufferInfo(gl, output_tensor.fbi);
+    }
+
+    twgl.resizeCanvasToDisplaySize(gl.canvas);
+    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+
+    // set inputs
+    const uniforms = {
+      resolution: resolution,
+      grid: [gridW, gridH],
+      input_tex: input_tensor.tex,
+      mouse_pos: [mouse_x, mouse_y],
+    };
+
+    // run shader
+    gl.useProgram(programInfo.program);
+    twgl.setBuffersAndAttributes(gl, programInfo, bufferInfo);
+    twgl.setUniforms(programInfo, uniforms);
+    twgl.drawBufferInfo(gl, bufferInfo);
+  }
+
+  function render(time) {
+
+    runProgram(copy_programInfo, front, back, [gridW, gridH]); // copy front to back
+    runProgram(programInfo, back, null, [gl.canvas.width, gl.canvas.height]); // display back
+
+    // swap();
+    requestAnimationFrame(render);
+  }
+
+  function getRelativeMousePosition(event, target) {
+    target = target || event.target;
+    var rect = target.getBoundingClientRect();
+
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    }
+  }
+
+  function getNoPaddingNoBorderCanvasRelativeMousePosition(event, target) {
+    target = target || event.target;
+    var pos = getRelativeMousePosition(event, target);
+
+    pos.x = pos.x * target.width / target.clientWidth;
+    pos.y = pos.y * target.height / target.clientHeight;
+
+    return pos;
+  }
+
+  window.addEventListener('mousemove', e => {
+
+    const pos = getNoPaddingNoBorderCanvasRelativeMousePosition(e, gl.canvas);
+    mouse_x = pos.x / gl.canvas.width;
+    mouse_y = 1.0 - pos.y / gl.canvas.height;
+  });
+
+  requestAnimationFrame(render);
+</script>
+
+</html>
